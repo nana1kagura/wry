@@ -21,11 +21,11 @@ use cocoa::{
 use dpi::{LogicalPosition, LogicalSize};
 use objc2::{
   declare::ClassBuilder,
-  runtime::{AnyObject, NSObject},
+  runtime::{AnyObject, NSObject, ProtocolObject},
   ClassType,
 };
 use objc2_app_kit::NSEvent;
-use objc2_web_kit::WKWebView;
+use objc2_web_kit::{WKDownloadDelegate, WKWebView};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use std::{
@@ -677,27 +677,27 @@ impl InnerWebView {
 
       let pending_scripts = Arc::new(Mutex::new(Some(Vec::new())));
 
-      let navigation_delegate_cls = match ClassDecl::new("WryNavigationDelegate", class!(NSObject))
-      {
-        Some(mut cls) => {
-          cls.add_ivar::<*mut c_void>("pending_scripts");
-          cls.add_ivar::<*mut c_void>("HasDownloadHandler");
-          cls.add_method(
-            sel!(webView:decidePolicyForNavigationAction:decisionHandler:),
-            navigation_policy as extern "C" fn(&Object, Sel, id, id, id),
-          );
-          cls.add_method(
-            sel!(webView:decidePolicyForNavigationResponse:decisionHandler:),
-            navigation_policy_response as extern "C" fn(&Object, Sel, id, id, id),
-          );
-          // add_download_methods(&mut cls); // FIXME: [objc2]
-          add_navigation_mathods(&mut cls);
-          cls.register()
-        }
-        None => class!(WryNavigationDelegate),
-      };
+      let navigation_delegate_cls =
+        match ClassBuilder::new("WryNavigationDelegate", NSObject::class()) {
+          Some(mut cls) => {
+            cls.add_ivar::<*mut c_void>("pending_scripts");
+            cls.add_ivar::<*mut c_void>("HasDownloadHandler");
+            cls.add_method(
+              objc2::sel!(webView:decidePolicyForNavigationAction:decisionHandler:),
+              navigation_policy as extern "C" fn(_, _, _, _, _),
+            );
+            cls.add_method(
+              objc2::sel!(webView:decidePolicyForNavigationResponse:decisionHandler:),
+              navigation_policy_response as extern "C" fn(_, _, _, _, _),
+            );
+            // add_download_methods(&mut cls); // FIXME: [objc2]
+            add_navigation_mathods(&mut cls);
+            cls.register()
+          }
+          None => objc2::class!(WryNavigationDelegate),
+        };
 
-      let navigation_policy_handler: id = msg_send![navigation_delegate_cls, new];
+      let navigation_policy_handler: id = objc2::msg_send![navigation_delegate_cls, new];
 
       (*navigation_policy_handler).set_ivar(
         "pending_scripts",
@@ -787,7 +787,10 @@ impl InnerWebView {
             *ivar_delegate = download_completed_ptr as *mut _ as *mut c_void;
           }
 
-          set_download_delegate(navigation_policy_handler, download_delegate);
+          set_download_delegate(
+            navigation_policy_handler,
+            download_delegate as &ProtocolObject<dyn WKDownloadDelegate>,
+          );
 
           navigation_policy_handler
         } else {
@@ -1246,17 +1249,17 @@ r#"Object.defineProperty(window, 'ipc', {
   }
 }
 
-pub fn url_from_webview(webview: id) -> Result<String> {
-  let url_obj: *mut Object = unsafe { msg_send![webview, URL] };
-  let absolute_url: *mut Object = unsafe { msg_send![url_obj, absoluteString] };
+pub fn url_from_webview(webview: &WKWebView) -> Result<String> {
+  let url_obj = unsafe { webview.URL().unwrap() };
+  let absolute_url = unsafe { url_obj.absoluteString().unwrap() };
 
   let bytes = {
-    let bytes: *const c_char = unsafe { msg_send![absolute_url, UTF8String] };
+    let bytes: *const c_char = unsafe { absolute_url.UTF8String() };
     bytes as *const u8
   };
 
   // 4 represents utf8 encoding
-  let len = unsafe { msg_send![absolute_url, lengthOfBytesUsingEncoding: 4] };
+  let len = unsafe { absolute_url.lengthOfBytesUsingEncoding(4) };
   let bytes = unsafe { std::slice::from_raw_parts(bytes, len) };
 
   std::str::from_utf8(bytes)
