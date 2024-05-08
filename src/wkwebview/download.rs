@@ -1,15 +1,13 @@
 use std::{path::PathBuf, ptr::null_mut, rc::Rc};
 
 use block2::Block;
-use icrate::{
-  Foundation::{NSError, NSString, NSURL},
-  WebKit::{WKDownload, WKDownloadDelegate, WKWebView},
-};
 use objc2::{
   declare::ClassBuilder,
   rc::Id,
   runtime::{AnyObject, NSObject, ProtocolObject, Sel},
 };
+use objc2_foundation::{NSError, NSString, NSURL};
+use objc2_web_kit::{WKDownload, WKDownloadDelegate, WKWebView};
 use std::ffi::c_void;
 
 pub(crate) unsafe fn set_download_delegate(

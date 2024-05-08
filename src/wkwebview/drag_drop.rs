@@ -7,24 +7,17 @@ use std::{
   path::PathBuf,
 };
 
-use icrate::{
-  AppKit::{NSDragOperation, NSDraggingInfo, NSFilenamesPboardType, NSView},
-  Foundation::{NSArray, NSPoint, NSRect, NSString},
-};
 use objc2::{
   class,
   declare::ClassBuilder,
   rc::Id,
   runtime::{AnyObject, Bool, ProtocolObject, Sel},
 };
+use objc2_app_kit::{NSDragOperation, NSDraggingInfo, NSFilenamesPboardType, NSView};
+use objc2_foundation::{NSArray, NSPoint, NSRect, NSString};
 use once_cell::sync::Lazy;
 
 use crate::DragDropEvent;
-
-// pub(crate) type NSDragOperation = cocoa::foundation::NSUInteger;
-
-#[allow(non_upper_case_globals)]
-const NSDragOperationCopy: NSDragOperation = 1;
 
 const DRAG_DROP_HANDLER_IVAR: &str = "DragDropHandler";
 
@@ -101,7 +94,7 @@ unsafe fn collect_paths(drag_info: &ProtocolObject<dyn NSDraggingInfo>) -> Vec<P
   if pb.availableTypeFromArray(&types).is_some() {
     let paths = pb.propertyListForType(NSFilenamesPboardType).unwrap();
     let paths: Id<NSArray<NSString>> = Id::<AnyObject>::cast(paths.clone());
-    for path in paths {
+    for path in paths.to_vec() {
       let path = CStr::from_ptr(path.UTF8String()).to_string_lossy();
       drag_drop_paths.push(PathBuf::from(path.into_owned()));
     }
@@ -120,17 +113,17 @@ extern "C" fn dragging_updated(
   let listener = unsafe { get_handler(this) };
   if !listener(DragDropEvent::Over { position }) {
     let os_operation = OBJC_DRAGGING_UPDATED(this, sel, drag_info);
-    if os_operation == 0 {
+    if os_operation == NSDragOperation::None {
       // 0 will be returned for a drop on any arbitrary location on the webview.
       // We'll override that with NSDragOperationCopy.
-      NSDragOperationCopy
+      NSDragOperation::Copy
     } else {
       // A different NSDragOperation is returned when a file is hovered over something like
       // a <input type="file">, so we'll make sure to preserve that behaviour.
       os_operation
     }
   } else {
-    NSDragOperationCopy
+    NSDragOperation::Copy
   }
 }
 
@@ -150,7 +143,7 @@ extern "C" fn dragging_entered(
     // Reject the Wry file drop (invoke the OS default behaviour)
     OBJC_DRAGGING_ENTERED(this, sel, drag_info)
   } else {
-    NSDragOperationCopy
+    NSDragOperation::Copy
   }
 }
 

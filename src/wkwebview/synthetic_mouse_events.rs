@@ -1,12 +1,10 @@
-use icrate::{
-  AppKit::{
-    NSAlternateKeyMask, NSCommandKeyMask, NSControlKeyMask, NSEvent, NSEventTypeOtherMouseDown,
-    NSEventTypeOtherMouseUp, NSShiftKeyMask, NSView,
-  },
-  Foundation::NSString,
-  WebKit::WKWebView,
-};
 use objc2::{declare::ClassBuilder, runtime::Sel};
+use objc2_app_kit::{
+  NSAlternateKeyMask, NSCommandKeyMask, NSControlKeyMask, NSEvent, NSEventType, NSShiftKeyMask,
+  NSView,
+};
+use objc2_foundation::NSString;
+use objc2_web_kit::WKWebView;
 
 pub unsafe fn add_synthetic_mouse_events_methods(decl: &mut ClassBuilder) {
   decl.add_method(
@@ -21,7 +19,7 @@ pub unsafe fn add_synthetic_mouse_events_methods(decl: &mut ClassBuilder) {
 
 extern "C" fn other_mouse_down(this: &WKWebView, _sel: Sel, event: &NSEvent) {
   unsafe {
-    if event.r#type() == NSEventTypeOtherMouseDown {
+    if event.r#type() == NSEventType::OtherMouseDown {
       let button_number = event.buttonNumber();
       match button_number {
         // back button
@@ -45,7 +43,7 @@ extern "C" fn other_mouse_down(this: &WKWebView, _sel: Sel, event: &NSEvent) {
 }
 extern "C" fn other_mouse_up(this: &WKWebView, _sel: Sel, event: &NSEvent) {
   unsafe {
-    if event.r#type() == NSEventTypeOtherMouseUp {
+    if event.r#type() == NSEventType::OtherMouseUp {
       let button_number = event.buttonNumber();
       match button_number {
         // back button
@@ -126,10 +124,10 @@ unsafe fn create_js_mouse_event(
     x = x,
     y = y,
     detail = event.clickCount(),
-    ctrl_key = mods_flags & NSControlKeyMask == NSControlKeyMask,
-    alt_key = mods_flags & NSAlternateKeyMask == NSAlternateKeyMask,
-    shift_key = mods_flags & NSShiftKeyMask == NSShiftKeyMask,
-    meta_key = mods_flags & NSCommandKeyMask == NSCommandKeyMask,
+    ctrl_key = mods_flags.0 & NSControlKeyMask.0 == NSControlKeyMask.0,
+    alt_key = mods_flags.0 & NSAlternateKeyMask.0 == NSAlternateKeyMask.0,
+    shift_key = mods_flags.0 & NSShiftKeyMask.0 == NSShiftKeyMask.0,
+    meta_key = mods_flags.0 & NSCommandKeyMask.0 == NSCommandKeyMask.0,
     button = button,
     buttons = buttons,
   )

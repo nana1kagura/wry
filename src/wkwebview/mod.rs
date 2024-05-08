@@ -19,12 +19,13 @@ use cocoa::{
 };
 
 use dpi::{LogicalPosition, LogicalSize};
-use icrate::{AppKit::NSEvent, WebKit::WKWebView};
 use objc2::{
   declare::ClassBuilder,
   runtime::{AnyObject, NSObject},
   ClassType,
 };
+use objc2_app_kit::NSEvent;
+use objc2_web_kit::WKWebView;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use std::{
@@ -767,12 +768,23 @@ impl InnerWebView {
           let download_delegate: *mut AnyObject = objc2::msg_send![cls, new];
           if let Some(download_started_handler) = attributes.download_started_handler {
             let download_started_ptr = Box::into_raw(Box::new(download_started_handler));
-            (*download_delegate).set_ivar("started", download_started_ptr as *mut _ as *mut c_void);
+            let ivar = (*download_delegate)
+              .class()
+              .instance_variable("started")
+              .unwrap();
+            let ivar_delegate = ivar.load_mut(&mut *download_delegate);
+            *ivar_delegate = download_started_ptr as *mut _ as *mut c_void;
           }
           if let Some(download_completed_handler) = attributes.download_completed_handler {
             let download_completed_ptr = Box::into_raw(Box::new(download_completed_handler));
-            (*download_delegate)
-              .set_ivar("completed", download_completed_ptr as *mut _ as *mut c_void);
+            // (*download_delegate)
+            //   .set_ivar("completed", download_completed_ptr as *mut _ as *mut c_void);
+            let ivar = (*download_delegate)
+              .class()
+              .instance_variable("completed")
+              .unwrap();
+            let ivar_delegate = ivar.load_mut(&mut *download_delegate);
+            *ivar_delegate = download_completed_ptr as *mut _ as *mut c_void;
           }
 
           set_download_delegate(navigation_policy_handler, download_delegate);
