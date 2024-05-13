@@ -15,7 +15,7 @@ mod synthetic_mouse_events;
 use cocoa::appkit::{NSViewHeightSizable, NSViewMinYMargin, NSViewWidthSizable};
 use cocoa::{
   base::{id, nil, NO, YES},
-  foundation::{NSDictionary, NSFastEnumeration, NSInteger},
+  foundation::NSInteger,
 };
 
 use dpi::{LogicalPosition, LogicalSize};
@@ -26,15 +26,16 @@ use objc2::{
   ffi::objc_alloc,
   msg_send_id, mutability,
   rc::Allocated,
-  runtime::{AnyClass, AnyObject, NSObject, ProtocolObject},
+  runtime::{AnyClass, AnyObject, Ivar, NSObject, ProtocolObject},
   ClassType, DeclaredClass,
 };
 use objc2_app_kit::{NSEvent, NSView};
 use objc2_foundation::{
-  ns_string, CGPoint, CGRect, CGSize, NSNumber, NSObjectNSKeyValueCoding, NSString,
+  ns_string, CGPoint, CGRect, CGSize, NSDictionary, NSHTTPURLResponse, NSMutableDictionary,
+  NSNumber, NSObjectNSKeyValueCoding,
 };
 use objc2_web_kit::{
-  WKAudiovisualMediaTypes, WKDownloadDelegate, WKWebView, WKWebViewConfiguration,
+  WKAudiovisualMediaTypes, WKDownloadDelegate, WKURLSchemeTask, WKWebView, WKWebViewConfiguration,
   WKWebsiteDataStore,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -43,7 +44,7 @@ use std::{
   borrow::Cow,
   ffi::{c_void, CStr},
   os::raw::c_char,
-  ptr::{null, null_mut},
+  ptr::{null, null_mut, NonNull},
   slice, str,
   sync::{Arc, Mutex},
 };
@@ -204,7 +205,12 @@ impl InnerWebView {
     }
 
     // Task handler for custom protocol
-    extern "C" fn start_task(this: &Object, _: Sel, _webview: id, task: id) {
+    extern "C" fn start_task(
+      this: &AnyObject,
+      _: objc2::runtime::Sel,
+      _webview: WKWebView,
+      task: ProtocolObject<dyn WKURLSchemeTask>,
+    ) {
       unsafe {
         #[cfg(feature = "tracing")]
         let span = tracing::info_span!("wry::custom_protocol::handle", uri = tracing::field::Empty)
@@ -215,74 +221,99 @@ impl InnerWebView {
             &mut *(*function as *mut Box<dyn Fn(Request<Vec<u8>>, RequestAsyncResponder)>);
 
           // Get url request
-          let request: id = msg_send![task, request];
-          let url: id = msg_send![request, URL];
+          let request = task.request();
+          // let request: id = msg_send![task, request];
+          let url = request.URL().unwrap();
+          // let url: id = msg_send![request, URL];
 
-          let uri_nsstring = {
-            let s: id = msg_send![url, absoluteString];
-            NSString(s)
-          };
-          let uri = uri_nsstring.to_str();
+          let uri = url.absoluteString().unwrap().to_string().as_str();
+          // let uri_nsstring = {
+          //   let s: id = msg_send![url, absoluteString];
+          //   NSString(s)
+          // };
+          // let uri = uri_nsstring.to_str();
 
           #[cfg(feature = "tracing")]
           span.record("uri", uri);
 
           // Get request method (GET, POST, PUT etc...)
-          let method = {
-            let s: id = msg_send![request, HTTPMethod];
-            NSString(s)
-          };
+          let method = request.HTTPMethod().unwrap().to_string().as_str();
+          // let method = {
+          //   let s: id = msg_send![request, HTTPMethod];
+          //   NSString(s)
+          // };
 
           // Prepare our HttpRequest
-          let mut http_request = Request::builder().uri(uri).method(method.to_str());
+          let mut http_request = Request::builder().uri(uri).method(method);
 
           // Get body
           let mut sent_form_body = Vec::new();
-          let body: id = msg_send![request, HTTPBody];
-          let body_stream: id = msg_send![request, HTTPBodyStream];
-          if !body.is_null() {
-            let length = msg_send![body, length];
-            let data_bytes: id = msg_send![body, bytes];
-            sent_form_body = slice::from_raw_parts(data_bytes as *const u8, length).to_vec();
-          } else if !body_stream.is_null() {
-            let _: () = msg_send![body_stream, open];
+          let body = request.HTTPBody();
+          // let body: id = msg_send![request, HTTPBody];
+          let body_stream = request.HTTPBodyStream();
+          // let body_stream: id = msg_send![request, HTTPBodyStream];
+          if let Some(body) = body {
+            let length = body.length();
+            // let length = msg_send![body, length];
+            let data_bytes = body.bytes();
+            // let data_bytes: id = msg_send![body, bytes];
+            sent_form_body = slice::from_raw_parts(data_bytes.as_ptr(), length).to_vec();
+          } else if let Some(body_stream) = body_stream {
+            body_stream.open();
+            // let _: () = msg_send![body_stream, open];
 
-            while msg_send![body_stream, hasBytesAvailable] {
+            while body_stream.hasBytesAvailable() {
               sent_form_body.reserve(128);
               let p = sent_form_body.as_mut_ptr().add(sent_form_body.len());
               let read_length = sent_form_body.capacity() - sent_form_body.len();
-              let count: usize = msg_send![body_stream, read: p maxLength: read_length];
-              sent_form_body.set_len(sent_form_body.len() + count);
+              let count = body_stream.read_maxLength(NonNull::new(p).unwrap(), read_length);
+              // let count: usize = msg_send![body_stream, read: p maxLength: read_length];
+              sent_form_body.set_len(sent_form_body.len() + count as usize);
             }
 
-            let _: () = msg_send![body_stream, close];
+            body_stream.close();
+            // let _: () = msg_send![body_stream, close];
           }
 
           // Extract all headers fields
-          let all_headers: id = msg_send![request, allHTTPHeaderFields];
+          let all_headers = request.allHTTPHeaderFields();
+          // let all_headers: id = msg_send![request, allHTTPHeaderFields];
 
           // get all our headers values and inject them in our request
-          for current_header_ptr in all_headers.iter() {
-            let header_field = NSString(current_header_ptr);
-            let header_value = NSString(all_headers.valueForKey_(current_header_ptr));
+          if let Some(all_headers) = all_headers {
+            for current_header in all_headers.allKeys().to_vec() {
+              let header_value = all_headers.valueForKey(current_header).unwrap();
 
-            // inject the header into the request
-            http_request = http_request.header(header_field.to_str(), header_value.to_str());
+              // inject the header into the request
+              http_request =
+                http_request.header(current_header.to_string(), header_value.to_string());
+            }
           }
 
           let respond_with_404 = || {
-            let urlresponse: id = msg_send![class!(NSHTTPURLResponse), alloc];
-            let response: id = msg_send![urlresponse, initWithURL:url statusCode:StatusCode::NOT_FOUND HTTPVersion:NSString::new(format!("{:#?}", Version::HTTP_11).as_str()) headerFields:null::<c_void>()];
-            let () = msg_send![task, didReceiveResponse: response];
+            let urlresponse = NSHTTPURLResponse::alloc();
+            // let urlresponse: id = msg_send![class!(NSHTTPURLResponse), alloc];
+            let response = NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
+              urlresponse,
+              &url,
+              StatusCode::NOT_FOUND.as_u16().try_into().unwrap(),
+              Some(ns_string!(format!("{:#?}", Version::HTTP_11).as_str())),
+              None,
+            )
+            .unwrap();
+            // let response: id = msg_send![urlresponse, initWithURL:url statusCode:StatusCode::NOT_FOUND HTTPVersion:NSString::new(format!("{:#?}", Version::HTTP_11).as_str()) headerFields:null::<c_void>()];
+            // let () = msg_send![task, didReceiveResponse: response];
+            task.didReceiveResponse(&response);
             // Finish
-            let () = msg_send![task, didFinish];
+            // let () = msg_send![task, didFinish];
+            task.didFinish();
           };
 
           // send response
           match http_request.body(sent_form_body) {
             Ok(final_request) => {
-              let responder: Box<dyn FnOnce(HttpResponse<Cow<'static, [u8]>>)> = Box::new(
-                move |sent_response| {
+              let responder: Box<dyn FnOnce(HttpResponse<Cow<'static, [u8]>>)> =
+                Box::new(move |sent_response| {
                   let content = sent_response.body();
                   // default: application/octet-stream, but should be provided by the client
                   let wanted_mime = sent_response.headers().get(CONTENT_TYPE);
@@ -291,34 +322,69 @@ impl InnerWebView {
                   // default to HTTP/1.1
                   let wanted_version = format!("{:#?}", sent_response.version());
 
-                  let dictionary: id = msg_send![class!(NSMutableDictionary), alloc];
-                  let headers: id = msg_send![dictionary, initWithCapacity:1];
+                  // let dictionary = NSMutableDictionary::alloc();
+                  // // let dictionary: id = msg_send![class!(NSMutableDictionary), alloc];
+                  // let headers = NSMutableDictionary::initWithCapacity(dictionary, 1);
+                  // // let headers: id = msg_send![dictionary, initWithCapacity:1];
+                  let headers = NSMutableDictionary::new();
+
                   if let Some(mime) = wanted_mime {
-                    let () = msg_send![headers, setObject:NSString::new(mime.to_str().unwrap()) forKey: NSString::new(CONTENT_TYPE.as_str())];
+                    headers.insert_id(
+                      objc2_foundation::NSString::from_str(mime.to_str().unwrap()).as_ref(),
+                      objc2_foundation::NSString::from_str(CONTENT_TYPE.as_str()),
+                    );
+                    // let () = msg_send![headers, setObject:NSString::new(mime.to_str().unwrap()) forKey: NSString::new(CONTENT_TYPE.as_str())];
                   }
-                  let () = msg_send![headers, setObject:NSString::new(&content.len().to_string()) forKey: NSString::new(CONTENT_LENGTH.as_str())];
+                  headers.insert_id(
+                    objc2_foundation::NSString::from_str(&content.len().to_string()).as_ref(),
+                    objc2_foundation::NSString::from_str(CONTENT_LENGTH.as_str()),
+                  );
+                  // let () = msg_send![headers, setObject:NSString::new(&content.len().to_string()) forKey: NSString::new(CONTENT_LENGTH.as_str())];
 
                   // add headers
                   for (name, value) in sent_response.headers().iter() {
                     let header_key = name.as_str();
                     if let Ok(value) = value.to_str() {
-                      let () = msg_send![headers, setObject:NSString::new(value) forKey: NSString::new(header_key)];
+                      headers.insert_id(
+                        objc2_foundation::NSString::from_str(name.as_str()).as_ref(),
+                        objc2_foundation::NSString::from_str(value),
+                      );
+                      // let () = msg_send![headers, setObject:NSString::new(value) forKey: NSString::new(header_key)];
                     }
                   }
 
-                  let urlresponse: id = msg_send![class!(NSHTTPURLResponse), alloc];
-                  let response: id = msg_send![urlresponse, initWithURL:url statusCode: wanted_status_code HTTPVersion:NSString::new(&wanted_version) headerFields:headers];
-                  let () = msg_send![task, didReceiveResponse: response];
+                  let urlresponse = NSHTTPURLResponse::alloc();
+                  // let urlresponse: id = msg_send![class!(NSHTTPURLResponse), alloc];
+                  let response =
+                    NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
+                      urlresponse,
+                      &url,
+                      wanted_status_code.try_into().unwrap(),
+                      Some(&objc2_foundation::NSString::from_str(&wanted_version)),
+                      Some(&headers),
+                    )
+                    .unwrap();
+                  // let response: id = msg_send![urlresponse, initWithURL:url statusCode: wanted_status_code HTTPVersion:NSString::new(&wanted_version) headerFields:headers];
+                  task.didReceiveResponse(&response);
+                  // let () = msg_send![task, didReceiveResponse: response];
 
                   // Send data
                   let bytes = content.as_ptr() as *mut c_void;
-                  let data: id = msg_send![class!(NSData), alloc];
-                  let data: id = msg_send![data, initWithBytesNoCopy:bytes length:content.len() freeWhenDone: if content.len() == 0 { NO } else { YES }];
-                  let () = msg_send![task, didReceiveData: data];
+                  let data = objc2_foundation::NSData::alloc();
+                  // let data: id = msg_send![class!(NSData), alloc];
+                  let data = objc2_foundation::NSData::initWithBytesNoCopy_length_freeWhenDone(
+                    data,
+                    NonNull::new(bytes).unwrap(),
+                    content.len(),
+                    if content.len() == 0 { NO } else { YES },
+                  );
+                  // let data: id = msg_send![data, initWithBytesNoCopy:bytes length:content.len() freeWhenDone: if content.len() == 0 { NO } else { YES }];
+                  task.didReceiveData(&data);
+                  // let () = msg_send![task, didReceiveData: data];
                   // Finish
-                  let () = msg_send![task, didFinish];
-                },
-              );
+                  task.didFinish();
+                  // let () = msg_send![task, didFinish];
+                });
 
               #[cfg(feature = "tracing")]
               let _span = tracing::info_span!("wry::custom_protocol::call_handler").entered();
@@ -334,7 +400,13 @@ impl InnerWebView {
         }
       }
     }
-    extern "C" fn stop_task(_: &Object, _: Sel, _webview: id, _task: id) {}
+    extern "C" fn stop_task(
+      _: &AnyObject,
+      _: objc2::runtime::Sel,
+      _webview: WKWebView,
+      _task: ProtocolObject<dyn WKURLSchemeTask>,
+    ) {
+    }
 
     // Safety: objc runtime calls are unsafe
     unsafe {
