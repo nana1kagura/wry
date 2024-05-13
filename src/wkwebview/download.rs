@@ -11,14 +11,14 @@ use objc2_web_kit::{WKDownload, WKDownloadDelegate, WKWebView};
 use std::ffi::c_void;
 
 pub(crate) unsafe fn set_download_delegate(
-  webview: &mut NSObject,
-  download_delegate: &ProtocolObject<dyn WKDownloadDelegate>,
+  webview: *mut AnyObject,
+  download_delegate: *mut AnyObject,
 ) {
-  let ivar = webview
+  let ivar = (*webview)
     .class()
     .instance_variable("DownloadDelegate")
     .unwrap();
-  let ivar_delegate = ivar.load_mut(webview);
+  let ivar_delegate = ivar.load_mut(&mut *webview);
 
   *ivar_delegate = download_delegate;
   // (*webview).set_ivar(

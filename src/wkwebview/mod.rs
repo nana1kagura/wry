@@ -12,7 +12,7 @@ mod proxy;
 mod synthetic_mouse_events;
 
 #[cfg(target_os = "macos")]
-use cocoa::appkit::{NSView, NSViewHeightSizable, NSViewMinYMargin, NSViewWidthSizable};
+use cocoa::appkit::{NSViewHeightSizable, NSViewMinYMargin, NSViewWidthSizable};
 use cocoa::{
   base::{id, nil, NO, YES},
   foundation::{NSDictionary, NSFastEnumeration, NSInteger},
@@ -20,12 +20,23 @@ use cocoa::{
 
 use dpi::{LogicalPosition, LogicalSize};
 use objc2::{
+  class,
   declare::ClassBuilder,
-  runtime::{AnyObject, NSObject, ProtocolObject},
-  ClassType,
+  declare_class,
+  ffi::objc_alloc,
+  msg_send_id, mutability,
+  rc::Allocated,
+  runtime::{AnyClass, AnyObject, NSObject, ProtocolObject},
+  ClassType, DeclaredClass,
 };
-use objc2_app_kit::NSEvent;
-use objc2_web_kit::{WKDownloadDelegate, WKWebView};
+use objc2_app_kit::{NSEvent, NSView};
+use objc2_foundation::{
+  ns_string, CGPoint, CGRect, CGSize, NSNumber, NSObjectNSKeyValueCoding, NSString,
+};
+use objc2_web_kit::{
+  WKAudiovisualMediaTypes, WKDownloadDelegate, WKWebView, WKWebViewConfiguration,
+  WKWebsiteDataStore,
+};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use std::{
@@ -37,10 +48,9 @@ use std::{
   sync::{Arc, Mutex},
 };
 
-use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use objc::{
   declare::ClassDecl,
-  runtime::{Class, Object, Sel, BOOL},
+  runtime::{Class, Object, Protocol, Sel, BOOL},
 };
 use objc_id::Id;
 
@@ -95,7 +105,7 @@ pub(crate) struct InnerWebView {
   page_load_handler: *mut Box<dyn Fn(PageLoadEvent)>,
   #[cfg(target_os = "macos")]
   drag_drop_ptr: *mut Box<dyn Fn(crate::DragDropEvent) -> bool>,
-  download_delegate: id,
+  download_delegate: *mut AnyObject,
   protocol_ptrs: Vec<*mut Box<dyn Fn(Request<Vec<u8>>, RequestAsyncResponder)>>,
 }
 
@@ -114,7 +124,15 @@ impl InnerWebView {
       _ => return Err(Error::UnsupportedWindowHandle),
     };
 
-    Self::new_ns_view(ns_view as _, attributes, pl_attrs, _web_context, false)
+    unsafe {
+      Self::new_ns_view(
+        &*(ns_view as *mut NSView),
+        attributes,
+        pl_attrs,
+        _web_context,
+        false,
+      )
+    }
   }
 
   pub fn new_as_child(
@@ -131,11 +149,19 @@ impl InnerWebView {
       _ => return Err(Error::UnsupportedWindowHandle),
     };
 
-    Self::new_ns_view(ns_view as _, attributes, pl_attrs, _web_context, true)
+    unsafe {
+      Self::new_ns_view(
+        &*(ns_view as *mut NSView),
+        attributes,
+        pl_attrs,
+        _web_context,
+        true,
+      )
+    }
   }
 
   fn new_ns_view(
-    ns_view: id,
+    ns_view: &NSView,
     attributes: WebViewAttributes,
     _pl_attrs: super::PlatformSpecificWebViewAttributes,
     _web_context: Option<&mut WebContext>,
@@ -313,44 +339,53 @@ impl InnerWebView {
     // Safety: objc runtime calls are unsafe
     unsafe {
       // Config and custom protocol
-      let config: id = msg_send![class!(WKWebViewConfiguration), new];
+      let config = WKWebViewConfiguration::new();
       let mut protocol_ptrs = Vec::new();
 
       // Incognito mode
-      let data_store: id = if attributes.incognito {
-        msg_send![class!(WKWebsiteDataStore), nonPersistentDataStore]
+      let data_store = if attributes.incognito {
+        WKWebsiteDataStore::nonPersistentDataStore()
       } else {
-        msg_send![class!(WKWebsiteDataStore), defaultDataStore]
+        WKWebsiteDataStore::defaultDataStore()
       };
 
       for (name, function) in attributes.custom_protocols {
         let scheme_name = format!("{}URLSchemeHandler", name);
-        let cls = ClassDecl::new(&scheme_name, class!(NSObject));
+        let cls = ClassBuilder::new(&scheme_name, NSObject::class());
         let cls = match cls {
           Some(mut cls) => {
             cls.add_ivar::<*mut c_void>("function");
             cls.add_method(
-              sel!(webView:startURLSchemeTask:),
-              start_task as extern "C" fn(&Object, Sel, id, id),
+              objc2::sel!(webView:startURLSchemeTask:),
+              start_task as extern "C" fn(_, _, _, _),
             );
             cls.add_method(
-              sel!(webView:stopURLSchemeTask:),
-              stop_task as extern "C" fn(&Object, Sel, id, id),
+              objc2::sel!(webView:stopURLSchemeTask:),
+              stop_task as extern "C" fn(_, _, _, _),
             );
             cls.register()
           }
-          None => Class::get(&scheme_name).expect("Failed to get the class definition"),
+          None => AnyClass::get(&scheme_name).expect("Failed to get the class definition"),
         };
-        let handler: id = msg_send![cls, new];
+        let handler: *mut AnyObject = objc2::msg_send![cls, new];
         let function = Box::into_raw(Box::new(function));
         protocol_ptrs.push(function);
 
-        (*handler).set_ivar("function", function as *mut _ as *mut c_void);
-        let () = msg_send![config, setURLSchemeHandler:handler forURLScheme:NSString::new(&name)];
+        let ivar = (*handler).class().instance_variable("function").unwrap();
+        let ivar_delegate = ivar.load_mut(&mut *handler);
+        *ivar_delegate = function as *mut _ as *mut c_void;
+        // (*handler).set_ivar("function", function as *mut _ as *mut c_void);
+
+        // let () = objc2::msg_send![&config, setURLSchemeHandler:handler forURLScheme:];
+        config.setURLSchemeHandler_forURLScheme(
+          Some(&*(handler.cast::<ProtocolObject<dyn objc2_web_kit::WKURLSchemeHandler>>())),
+          &objc2_foundation::NSString::from_str(&name),
+        );
       }
 
       // WebView and manager
-      let manager: id = msg_send![config, userContentController];
+      // let manager: id = msg_send![config, userContentController];
+      let manager = config.userContentController();
       let cls = match objc2::declare::ClassBuilder::new("WryWebView", WKWebView::class()) {
         #[allow(unused_mut)]
         Some(mut decl) => {
@@ -396,12 +431,44 @@ impl InnerWebView {
         _ => objc2::class!(WryWebView),
       };
 
-      let webview: *mut AnyObject = objc2::msg_send![cls, alloc]; // FIXME: [objc2]
-      let webview = webview as *mut _ as *mut Object; // FIXME: [objc2]
+      // #[derive(Clone)]
+      // struct WryWebViewIvars {
+      //   ACCEPT_FIRST_MOUSE: objc2::runtime::Bool,
+      //   DRAG_DROP_HANDLER_IVAR: *mut c_void,
+      // }
 
-      let () = msg_send![config, setWebsiteDataStore: data_store];
-      let _preference: id = msg_send![config, preferences];
-      let _yes: id = msg_send![class!(NSNumber), numberWithBool:1];
+      // declare_class!(
+      //   pub(super) struct WryWebView;
+
+      //   unsafe impl ClassType for WryWebView {
+      //     type Super = WKWebView;
+      //     type Mutability = mutability::MainThreadOnly;
+      //     const NAME: &'static str = "WryWebView";
+      //   }
+
+      //   impl DeclaredClass for WryWebView {
+      //     type Ivars = WryWebViewIvars;
+      //   }
+
+      //   unsafe impl WryWebView {
+
+      //   }
+      // );
+
+      // impl WryWebView {
+      //   pub fn new() -> Id<Self> {
+      //     unsafe { msg_send_id![Self::alloc(), alloc] }
+      //   }
+      // }
+
+      let webview: Allocated<AnyObject> = objc2::msg_send_id![cls, alloc]; // FIXME: [objc2]
+
+      config.setWebsiteDataStore(&data_store);
+      // let () = msg_send![config, setWebsiteDataStore: data_store];
+      let _preference = config.preferences();
+      // let _preference: id = msg_send![config, preferences];
+      let _yes = NSNumber::numberWithBool(YES);
+      // let _yes: id = msg_send![class!(NSNumber), numberWithBool:1];
 
       #[cfg(feature = "mac-proxy")]
       if let Some(proxy_config) = attributes.proxy_config {
@@ -421,16 +488,32 @@ impl InnerWebView {
       }
 
       #[cfg(target_os = "macos")]
-      (*webview).set_ivar(ACCEPT_FIRST_MOUSE, attributes.accept_first_mouse);
+      {
+        let ivar = objc2::class!(WryWebView)
+          .instance_variable("ACCEPT_FIRST_MOUSE")
+          .unwrap();
+        let ivar_delegate = ivar.load_mut(&mut webview.set_ivars(ivars));
+        *ivar_delegate = objc2::runtime::Bool::from(attributes.accept_first_mouse);
+        // (*webview).set_ivar(ACCEPT_FIRST_MOUSE, attributes.accept_first_mouse);
+      }
 
-      let _: id = msg_send![_preference, setValue:_yes forKey:NSString::new("allowsPictureInPictureMediaPlayback")];
+      _preference.as_super().setValue_forKey(
+        Some(&_yes),
+        ns_string!("allowsPictureInPictureMediaPlayback"),
+      );
 
       if attributes.autoplay {
-        let _: id = msg_send![config, setMediaTypesRequiringUserActionForPlayback:0];
+        config.setMediaTypesRequiringUserActionForPlayback(
+          WKAudiovisualMediaTypes::WKAudiovisualMediaTypeNone,
+        );
+        // let _: id = msg_send![config, setMediaTypesRequiringUserActionForPlayback:0];
       }
 
       #[cfg(target_os = "macos")]
-      let _: id = msg_send![_preference, setValue:_yes forKey:NSString::new("tabFocusesLinks")];
+      _preference
+        .as_super()
+        .setValue_forKey(Some(&_yes), ns_string!("tabFocusesLinks"));
+      // let _: id = msg_send![_preference, setValue:_yes forKey:NSString::new("tabFocusesLinks")];
 
       #[cfg(feature = "transparent")]
       if attributes.transparent {
@@ -449,7 +532,7 @@ impl InnerWebView {
       {
         use cocoa::appkit::NSWindow;
 
-        let window: id = msg_send![ns_view, window];
+        let window = ns_view.window().unwrap();
         let scale_factor = window.backingScaleFactor();
         let (x, y) = attributes
           .bounds
@@ -474,11 +557,22 @@ impl InnerWebView {
         });
 
         let frame = CGRect {
-          origin: window_position(if is_child { ns_view } else { webview }, x, y, h as f64),
+          origin: window_position(
+            if is_child {
+              ns_view
+            } else {
+              &*webview.cast::<NSView>()
+            },
+            x,
+            y,
+            h as f64,
+          ),
           size: CGSize::new(w as f64, h as f64),
         };
 
-        let _: () = msg_send![webview, initWithFrame:frame configuration:config];
+        WKWebView::initWithFrame_configuration(webview, frame, &config);
+        // let _: () = objc2::msg_send![webview, initWithFrame:frame configuration:config];
+
         if is_child {
           // fixed element
           webview.setAutoresizingMask_(NSViewMinYMargin);
@@ -697,12 +791,19 @@ impl InnerWebView {
           None => objc2::class!(WryNavigationDelegate),
         };
 
-      let navigation_policy_handler: id = objc2::msg_send![navigation_delegate_cls, new];
+      let navigation_policy_handler: *mut AnyObject =
+        objc2::msg_send![navigation_delegate_cls, new];
 
-      (*navigation_policy_handler).set_ivar(
-        "pending_scripts",
-        Box::into_raw(Box::new(pending_scripts.clone())) as *mut c_void,
-      );
+      let ivar = (*navigation_policy_handler)
+        .class()
+        .instance_variable("pending_scripts")
+        .unwrap();
+      let ivar_delegate = ivar.load_mut(&mut *navigation_policy_handler);
+      *ivar_delegate = Box::into_raw(Box::new(pending_scripts.clone())) as *mut c_void;
+      // (*navigation_policy_handler).set_ivar(
+      //   "pending_scripts",
+      //   Box::into_raw(Box::new(pending_scripts.clone())) as *mut c_void,
+      // );
 
       let (navigation_decide_policy_ptr, download_delegate) = if attributes
         .navigation_handler
@@ -727,18 +828,31 @@ impl InnerWebView {
             }) as Box<dyn Fn(String, bool) -> bool>,
           ))
         };
-        (*navigation_policy_handler).set_ivar(
-          "navigation_policy_function",
-          function_ptr as *mut _ as *mut c_void,
-        );
+
+        let ivar = (*navigation_policy_handler)
+          .class()
+          .instance_variable("navigation_policy_function")
+          .unwrap();
+        let ivar_delegate = ivar.load_mut(&mut *navigation_policy_handler);
+        *ivar_delegate = function_ptr as *mut c_void;
+        // (*navigation_policy_handler).set_ivar(
+        //   "navigation_policy_function",
+        //   function_ptr as *mut _ as *mut c_void,
+        // );
 
         let has_download_handler = Box::into_raw(Box::new(Box::new(
           attributes.download_started_handler.is_some(),
         )));
-        (*navigation_policy_handler).set_ivar(
-          "HasDownloadHandler",
-          has_download_handler as *mut _ as *mut c_void,
-        );
+        let ivar = (*navigation_policy_handler)
+          .class()
+          .instance_variable("HasDownloadHandler")
+          .unwrap();
+        let ivar_delegate = ivar.load_mut(&mut *navigation_policy_handler);
+        *ivar_delegate = has_download_handler as *mut c_void;
+        // (*navigation_policy_handler).set_ivar(
+        //   "HasDownloadHandler",
+        //   has_download_handler as *mut _ as *mut c_void,
+        // );
 
         // Download handler
         let download_delegate = if attributes.download_started_handler.is_some()
@@ -787,10 +901,7 @@ impl InnerWebView {
             *ivar_delegate = download_completed_ptr as *mut _ as *mut c_void;
           }
 
-          set_download_delegate(
-            navigation_policy_handler,
-            download_delegate as &ProtocolObject<dyn WKDownloadDelegate>,
-          );
+          set_download_delegate(navigation_policy_handler, download_delegate);
 
           navigation_policy_handler
         } else {
@@ -1386,7 +1497,7 @@ struct NSData(id);
 /// Converts from wry screen-coordinates to macOS screen-coordinates.
 /// wry: top-left is (0, 0) and y increasing downwards
 /// macOS: bottom-left is (0, 0) and y increasing upwards
-unsafe fn window_position(view: id, x: i32, y: i32, height: f64) -> CGPoint {
-  let frame: CGRect = msg_send![view, frame];
+unsafe fn window_position(view: &NSView, x: i32, y: i32, height: f64) -> CGPoint {
+  let frame: CGRect = view.frame();
   CGPoint::new(x as f64, frame.size.height - y as f64 - height)
 }
