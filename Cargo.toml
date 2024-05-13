@@ -109,11 +109,20 @@ objc2-web-kit = { version = "0.2.0", features = [
   "WKDownload",
   "WKDownloadDelegate",
   "WKNavigation",
-  "WKNavigationDelegate"
+  "WKNavigationDelegate",
+  "WKUserContentController",
+  "WKURLSchemeHandler",
+  "WKPreferences",
 ] }
-objc2-foundation = { version = "0.2.0", features = ["NSURLRequest", "NSURL"] }
+objc2-foundation = { version = "0.2.0", features = [
+  "NSURLRequest",
+  "NSURL",
+  "NSString",
+  "NSKeyValueCoding",
+] }
 objc2-app-kit = { version = "0.2.0", features = [
   "NSEvent",
+  "NSWindow",
   "NSView",
   "NSPasteboard",
 ] }
