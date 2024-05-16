@@ -25,14 +25,14 @@ use objc2::{
   declare_class,
   ffi::objc_alloc,
   msg_send_id, mutability,
-  rc::Allocated,
+  rc::{Allocated, PartialInit},
   runtime::{AnyClass, AnyObject, Ivar, NSObject, ProtocolObject},
   ClassType, DeclaredClass,
 };
-use objc2_app_kit::{NSEvent, NSView};
+use objc2_app_kit::{NSAutoresizingMaskOptions, NSEvent, NSView};
 use objc2_foundation::{
-  ns_string, CGPoint, CGRect, CGSize, NSDictionary, NSHTTPURLResponse, NSMutableDictionary,
-  NSNumber, NSObjectNSKeyValueCoding,
+  ns_string, CGPoint, CGRect, CGSize, MainThreadMarker, NSDictionary, NSHTTPURLResponse,
+  NSMutableDictionary, NSNumber, NSObjectNSKeyValueCoding,
 };
 use objc2_web_kit::{
   WKAudiovisualMediaTypes, WKDownloadDelegate, WKURLSchemeTask, WKWebView, WKWebViewConfiguration,
@@ -226,7 +226,7 @@ impl InnerWebView {
           let url = request.URL().unwrap();
           // let url: id = msg_send![request, URL];
 
-          let uri = url.absoluteString().unwrap().to_string().as_str();
+          let uri = url.absoluteString().unwrap().to_string();
           // let uri_nsstring = {
           //   let s: id = msg_send![url, absoluteString];
           //   NSString(s)
@@ -237,14 +237,14 @@ impl InnerWebView {
           span.record("uri", uri);
 
           // Get request method (GET, POST, PUT etc...)
-          let method = request.HTTPMethod().unwrap().to_string().as_str();
+          let method = request.HTTPMethod().unwrap().to_string();
           // let method = {
           //   let s: id = msg_send![request, HTTPMethod];
           //   NSString(s)
           // };
 
           // Prepare our HttpRequest
-          let mut http_request = Request::builder().uri(uri).method(method);
+          let mut http_request = Request::builder().uri(uri).method(method.as_str());
 
           // Get body
           let mut sent_form_body = Vec::new();
@@ -297,7 +297,9 @@ impl InnerWebView {
               urlresponse,
               &url,
               StatusCode::NOT_FOUND.as_u16().try_into().unwrap(),
-              Some(ns_string!(format!("{:#?}", Version::HTTP_11).as_str())),
+              Some(&objc2_foundation::NSString::from_str(
+                format!("{:#?}", Version::HTTP_11).as_str(),
+              )),
               None,
             )
             .unwrap();
@@ -326,7 +328,7 @@ impl InnerWebView {
                   // // let dictionary: id = msg_send![class!(NSMutableDictionary), alloc];
                   // let headers = NSMutableDictionary::initWithCapacity(dictionary, 1);
                   // // let headers: id = msg_send![dictionary, initWithCapacity:1];
-                  let headers = NSMutableDictionary::new();
+                  let mut headers = NSMutableDictionary::new();
 
                   if let Some(mime) = wanted_mime {
                     headers.insert_id(
@@ -503,36 +505,6 @@ impl InnerWebView {
         _ => objc2::class!(WryWebView),
       };
 
-      // #[derive(Clone)]
-      // struct WryWebViewIvars {
-      //   ACCEPT_FIRST_MOUSE: objc2::runtime::Bool,
-      //   DRAG_DROP_HANDLER_IVAR: *mut c_void,
-      // }
-
-      // declare_class!(
-      //   pub(super) struct WryWebView;
-
-      //   unsafe impl ClassType for WryWebView {
-      //     type Super = WKWebView;
-      //     type Mutability = mutability::MainThreadOnly;
-      //     const NAME: &'static str = "WryWebView";
-      //   }
-
-      //   impl DeclaredClass for WryWebView {
-      //     type Ivars = WryWebViewIvars;
-      //   }
-
-      //   unsafe impl WryWebView {
-
-      //   }
-      // );
-
-      // impl WryWebView {
-      //   pub fn new() -> Id<Self> {
-      //     unsafe { msg_send_id![Self::alloc(), alloc] }
-      //   }
-      // }
-
       let webview: Allocated<AnyObject> = objc2::msg_send_id![cls, alloc]; // FIXME: [objc2]
 
       config.setWebsiteDataStore(&data_store);
@@ -557,16 +529,6 @@ impl InnerWebView {
 
         let proxies: id = msg_send![class!(NSArray), arrayWithObject: proxy_config];
         let () = msg_send![data_store, setProxyConfigurations: proxies];
-      }
-
-      #[cfg(target_os = "macos")]
-      {
-        let ivar = objc2::class!(WryWebView)
-          .instance_variable("ACCEPT_FIRST_MOUSE")
-          .unwrap();
-        let ivar_delegate = ivar.load_mut(&mut webview.set_ivars(ivars));
-        *ivar_delegate = objc2::runtime::Bool::from(attributes.accept_first_mouse);
-        // (*webview).set_ivar(ACCEPT_FIRST_MOUSE, attributes.accept_first_mouse);
       }
 
       _preference.as_super().setValue_forKey(
@@ -602,8 +564,6 @@ impl InnerWebView {
 
       #[cfg(target_os = "macos")]
       {
-        use cocoa::appkit::NSWindow;
-
         let window = ns_view.window().unwrap();
         let scale_factor = window.backingScaleFactor();
         let (x, y) = attributes
@@ -630,27 +590,39 @@ impl InnerWebView {
 
         let frame = CGRect {
           origin: window_position(
-            if is_child {
-              ns_view
-            } else {
-              &*webview.cast::<NSView>()
-            },
-            x,
-            y,
-            h as f64,
+            // if is_child {
+            //   ns_view
+            // } else {
+            //   &*webview.cast::<NSView>()
+            // },
+            ns_view, x, y, h as f64,
           ),
           size: CGSize::new(w as f64, h as f64),
         };
 
-        WKWebView::initWithFrame_configuration(webview, frame, &config);
+        let webview = WKWebView::initWithFrame_configuration(webview, frame, &config);
         // let _: () = objc2::msg_send![webview, initWithFrame:frame configuration:config];
+
+        #[cfg(target_os = "macos")]
+        {
+          let ivar = objc2::class!(WryWebView)
+            .instance_variable("ACCEPT_FIRST_MOUSE")
+            .unwrap();
+          let ivar_delegate = ivar.load_mut(&mut webview);
+          *ivar_delegate = objc2::runtime::Bool::from(attributes.accept_first_mouse);
+          // (*webview).set_ivar(ACCEPT_FIRST_MOUSE, attributes.accept_first_mouse);
+        }
 
         if is_child {
           // fixed element
-          webview.setAutoresizingMask_(NSViewMinYMargin);
+          webview.setAutoresizingMask(NSAutoresizingMaskOptions::NSViewMinYMargin);
         } else {
           // Auto-resize
-          webview.setAutoresizingMask_(NSViewHeightSizable | NSViewWidthSizable);
+          let options = NSAutoresizingMaskOptions(
+            NSAutoresizingMaskOptions::NSViewHeightSizable.0
+              | NSAutoresizingMaskOptions::NSViewWidthSizable.0,
+          );
+          webview.setAutoresizingMask(options);
         }
       }
 
@@ -1573,3 +1545,62 @@ unsafe fn window_position(view: &NSView, x: i32, y: i32, height: f64) -> CGPoint
   let frame: CGRect = view.frame();
   CGPoint::new(x as f64, frame.size.height - y as f64 - height)
 }
+
+// #[derive(Clone)]
+// struct WryWebViewIvars {
+//   accept_first_mouse: objc2::runtime::Bool,
+//   drag_drop_handler_ptr: *mut c_void,
+// }
+
+// declare_class!(
+//   pub(super) struct WryWebView;
+
+//   unsafe impl ClassType for WryWebView {
+//     type Super = WKWebView;
+//     type Mutability = mutability::MainThreadOnly;
+//     const NAME: &'static str = "WryWebView";
+//   }
+
+//   impl DeclaredClass for WryWebView {
+//     type Ivars = WryWebViewIvars;
+//   }
+
+//   unsafe impl WryWebView {
+//     #[method(acceptsFirstMouse:)]
+//     fn accept_first_mouse(&self, _event: &NSEvent) -> objc2::runtime::Bool {
+//       unsafe {
+//         let accept = self.get_ivar::<objc2::runtime::Bool>(ACCEPT_FIRST_MOUSE);
+//         if accept.as_bool() {
+//           objc2::runtime::Bool::YES
+//         } else {
+//           objc2::runtime::Bool::NO
+//         }
+//       }
+//     }
+
+//     #[method(performKeyEquivalent:)]
+//     fn perform_key_equivalent(&self, _event: &NSEvent) -> objc2::runtime::Bool {
+//       objc2::runtime::Bool::NO
+//     }
+//   }
+
+
+// );
+
+// impl WryWebView {
+//   pub(super) fn new(
+//     ns_view: &NSView,
+//     frame: CGRect,
+//     config: &WKWebViewConfiguration,
+//     accept_first_mouse: bool,
+//   ) -> Id<Self> {
+//     let mtm = MainThreadMarker::from(ns_view);
+//     let this: PartialInit<Self> = mtm.alloc().set_ivars(WryWebViewIvars {
+//       accept_first_mouse: accept_first_mouse.into(),
+//       drag_drop_handler_ptr: null_mut(),
+//     });
+//     let this = unsafe { objc2::msg_send_id![this as PartialInit<WKWebView>, init] } as Id<Self>;
+
+//     this
+//   }
+// }
