@@ -23,7 +23,7 @@ use objc2::{
   class,
   declare::ClassBuilder,
   declare_class,
-  ffi::objc_alloc,
+  ffi::{nil, objc_alloc, YES},
   msg_send_id, mutability,
   rc::{Allocated, PartialInit},
   runtime::{AnyClass, AnyObject, Ivar, NSObject, ProtocolObject},
@@ -32,11 +32,12 @@ use objc2::{
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSEvent, NSView};
 use objc2_foundation::{
   ns_string, CGPoint, CGRect, CGSize, MainThreadMarker, NSDictionary, NSHTTPURLResponse,
-  NSMutableDictionary, NSNumber, NSObjectNSKeyValueCoding,
+  NSKeyValueObservingOptions, NSMutableDictionary, NSNumber, NSObjectNSKeyValueCoding,
+  NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString,
 };
 use objc2_web_kit::{
-  WKAudiovisualMediaTypes, WKDownloadDelegate, WKURLSchemeTask, WKWebView, WKWebViewConfiguration,
-  WKWebsiteDataStore,
+  WKAudiovisualMediaTypes, WKDownloadDelegate, WKScriptMessageHandler, WKURLSchemeTask, WKWebView,
+  WKWebViewConfiguration, WKWebsiteDataStore,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -94,7 +95,7 @@ const ACCEPT_FIRST_MOUSE: &str = "accept_first_mouse";
 const NS_JSON_WRITING_FRAGMENTS_ALLOWED: u64 = 4;
 
 pub(crate) struct InnerWebView {
-  pub webview: id,
+  pub webview: WKWebView,
   pub manager: id,
   is_child: bool,
   pending_scripts: Arc<Mutex<Option<Vec<String>>>>,
@@ -505,7 +506,7 @@ impl InnerWebView {
         _ => objc2::class!(WryWebView),
       };
 
-      let webview: Allocated<AnyObject> = objc2::msg_send_id![cls, alloc]; // FIXME: [objc2]
+      let webview: Allocated<WKWebView> = objc2::msg_send_id![cls, alloc]; // FIXME: [objc2]
 
       config.setWebsiteDataStore(&data_store);
       // let () = msg_send![config, setWebsiteDataStore: data_store];
@@ -543,12 +544,6 @@ impl InnerWebView {
         // let _: id = msg_send![config, setMediaTypesRequiringUserActionForPlayback:0];
       }
 
-      #[cfg(target_os = "macos")]
-      _preference
-        .as_super()
-        .setValue_forKey(Some(&_yes), ns_string!("tabFocusesLinks"));
-      // let _: id = msg_send![_preference, setValue:_yes forKey:NSString::new("tabFocusesLinks")];
-
       #[cfg(feature = "transparent")]
       if attributes.transparent {
         let no: id = msg_send![class!(NSNumber), numberWithBool:0];
@@ -562,8 +557,7 @@ impl InnerWebView {
       // [preference setValue:@YES forKey:@"fullScreenEnabled"];
       let _: id = msg_send![_preference, setValue:_yes forKey:NSString::new("fullScreenEnabled")];
 
-      #[cfg(target_os = "macos")]
-      {
+      let webview = if cfg!(target_os = "macos") {
         let window = ns_view.window().unwrap();
         let scale_factor = window.backingScaleFactor();
         let (x, y) = attributes
@@ -589,29 +583,28 @@ impl InnerWebView {
         });
 
         let frame = CGRect {
-          origin: window_position(
-            // if is_child {
-            //   ns_view
-            // } else {
-            //   &*webview.cast::<NSView>()
-            // },
-            ns_view, x, y, h as f64,
-          ),
+          origin: window_position(ns_view, x, y, h as f64),
           size: CGSize::new(w as f64, h as f64),
         };
-
         let webview = WKWebView::initWithFrame_configuration(webview, frame, &config);
         // let _: () = objc2::msg_send![webview, initWithFrame:frame configuration:config];
+        webview
+      } else if cfg!(target_os = "ios") {
+        let frame = ns_view.frame();
+        let webview = WKWebView::initWithFrame_configuration(webview, frame, &config);
+        webview
+      } else {
+        unreachable!()
+      };
 
-        #[cfg(target_os = "macos")]
-        {
-          let ivar = objc2::class!(WryWebView)
-            .instance_variable("ACCEPT_FIRST_MOUSE")
-            .unwrap();
-          let ivar_delegate = ivar.load_mut(&mut webview);
-          *ivar_delegate = objc2::runtime::Bool::from(attributes.accept_first_mouse);
-          // (*webview).set_ivar(ACCEPT_FIRST_MOUSE, attributes.accept_first_mouse);
-        }
+      #[cfg(target_os = "macos")]
+      {
+        let ivar = objc2::class!(WryWebView)
+          .instance_variable("ACCEPT_FIRST_MOUSE")
+          .unwrap();
+        let ivar_delegate = ivar.load_mut(&mut webview);
+        *ivar_delegate = objc2::runtime::Bool::from(attributes.accept_first_mouse);
+        // (*webview).set_ivar(ACCEPT_FIRST_MOUSE, attributes.accept_first_mouse);
 
         if is_child {
           // fixed element
@@ -624,14 +617,24 @@ impl InnerWebView {
           );
           webview.setAutoresizingMask(options);
         }
-      }
 
+        // allowsBackForwardNavigation
+        let value = attributes.back_forward_navigation_gestures;
+        webview.setAllowsBackForwardNavigationGestures(value);
+        // let _: () = msg_send![webview, setAllowsBackForwardNavigationGestures: value];
+
+        // tabFocusesLinks
+        _preference
+          .as_super()
+          .setValue_forKey(Some(&_yes), ns_string!("tabFocusesLinks"));
+        // let _: id = msg_send![_preference, setValue:_yes forKey:NSString::new("tabFocusesLinks")];
+      }
       #[cfg(target_os = "ios")]
       {
-        let frame: CGRect = msg_send![ns_view, frame];
-        // set all autoresizingmasks
-        let () = msg_send![webview, setAutoresizingMask: 31];
-        let _: () = msg_send![webview, initWithFrame:frame configuration:config];
+        // let frame: CGRect = msg_send![ns_view, frame];
+        // // set all autoresizingmasks
+        // let () = msg_send![webview, setAutoresizingMask: 31];
+        // let _: () = msg_send![webview, initWithFrame:frame configuration:config];
 
         // disable scroll bounce by default
         let scroll: id = msg_send![webview, scrollView];
@@ -639,105 +642,127 @@ impl InnerWebView {
       }
 
       if !attributes.visible {
-        let () = msg_send![webview, setHidden: YES];
+        webview.setHidden(true);
+        // let () = msg_send![webview, setHidden: YES];
       }
 
       #[cfg(any(debug_assertions, feature = "devtools"))]
       if attributes.devtools {
-        let has_inspectable_property: BOOL =
-          msg_send![webview, respondsToSelector: sel!(setInspectable:)];
-        if has_inspectable_property == YES {
-          let _: () = msg_send![webview, setInspectable: YES];
+        let has_inspectable_property: bool =
+          NSObject::respondsToSelector(&webview, objc2::sel!(setInspectable:));
+        // let has_inspectable_property: BOOL =
+        //   msg_send![webview, respondsToSelector: sel!(setInspectable:)];
+        if has_inspectable_property == true {
+          // let _: () = msg_send![webview, setInspectable: YES];
+          webview.setInspectable(true);
         }
+        // let has_inspectable_property: BOOL =
+        // msg_send![webview, respondsToSelector: sel!(setInspectable:)];
+        // if has_inspectable_property == YES {
+        //   let _: () = msg_send![webview, setInspectable: YES];
+        // }
         // this cannot be on an `else` statement, it does not work on macOS :(
-        let dev = NSString::new("developerExtrasEnabled");
-        let _: id = msg_send![_preference, setValue:_yes forKey:dev];
-      }
-
-      // allowsBackForwardNavigation
-      #[cfg(target_os = "macos")]
-      {
-        let value = attributes.back_forward_navigation_gestures;
-        let _: () = msg_send![webview, setAllowsBackForwardNavigationGestures: value];
+        // let dev = NSString::new("developerExtrasEnabled");
+        let dev = objc2_foundation::NSString::from_str("developerExtrasEnabled");
+        _preference.setValue_forKey(Some(&_yes), &dev);
+        // let _: id = objc2::msg_send![_preference, setValue:_yes forKey:dev];
       }
 
       // Message handler
       let ipc_handler_ptr = if let Some(ipc_handler) = attributes.ipc_handler {
-        let cls = ClassDecl::new("WebViewDelegate", class!(NSObject));
+        let cls = ClassBuilder::new("WebViewDelegate", NSObject::class());
         let cls = match cls {
           Some(mut cls) => {
             cls.add_ivar::<*mut c_void>("function");
             cls.add_method(
-              sel!(userContentController:didReceiveScriptMessage:),
-              did_receive as extern "C" fn(&Object, Sel, id, id),
+              objc2::sel!(userContentController:didReceiveScriptMessage:),
+              did_receive as extern "C" fn(_, _, _, _),
             );
             cls.register()
           }
           None => class!(WebViewDelegate),
         };
-        let handler: id = msg_send![cls, new];
+        let handler: *mut AnyObject = objc2::msg_send![cls, new];
         let ipc_handler_ptr = Box::into_raw(Box::new(ipc_handler));
 
-        (*handler).set_ivar("function", ipc_handler_ptr as *mut _ as *mut c_void);
-        let ipc = NSString::new(IPC_MESSAGE_HANDLER_NAME);
-        let _: () = msg_send![manager, addScriptMessageHandler:handler name:ipc];
+        let ivar = (*handler).class().instance_variable("function").unwrap();
+        let ivar_delegate = ivar.load_mut(&mut *handler);
+        *ivar_delegate = ipc_handler_ptr as *mut _ as *mut c_void;
+        // (*handler).set_ivar("function", ipc_handler_ptr as *mut _ as *mut c_void);
+
+        let ipc = objc2_foundation::NSString::from_str(IPC_MESSAGE_HANDLER_NAME);
+        manager.addScriptMessageHandler_name(
+          &*(handler.cast::<ProtocolObject<dyn WKScriptMessageHandler>>()),
+          &ipc,
+        );
+        // let _: () = msg_send![manager, addScriptMessageHandler:handler name:ipc];
         ipc_handler_ptr
       } else {
         null_mut()
       };
 
       // Document title changed handler
-      let document_title_changed_handler = if let Some(document_title_changed_handler) =
-        attributes.document_title_changed_handler
-      {
-        let cls = ClassDecl::new("DocumentTitleChangedDelegate", class!(NSObject));
-        let cls = match cls {
-          Some(mut cls) => {
-            cls.add_ivar::<*mut c_void>("function");
-            cls.add_method(
-              sel!(observeValueForKeyPath:ofObject:change:context:),
-              observe_value_for_key_path as extern "C" fn(&Object, Sel, id, id, id, id),
-            );
-            extern "C" fn observe_value_for_key_path(
-              this: &Object,
-              _sel: Sel,
-              key_path: id,
-              of_object: id,
-              _change: id,
-              _context: id,
-            ) {
-              let key = NSString(key_path);
-              if key.to_str() == "title" {
-                unsafe {
-                  let function = this.get_ivar::<*mut c_void>("function");
-                  if !function.is_null() {
-                    let function = &mut *(*function as *mut Box<dyn Fn(String)>);
-                    let title: id = msg_send![of_object, title];
-                    (function)(NSString(title).to_str().to_string());
+      let document_title_changed_handler =
+        if let Some(document_title_changed_handler) = attributes.document_title_changed_handler {
+          let cls = ClassBuilder::new("DocumentTitleChangedDelegate", NSObject::class());
+          let cls = match cls {
+            Some(mut cls) => {
+              cls.add_ivar::<*mut c_void>("function");
+              cls.add_method(
+                objc2::sel!(observeValueForKeyPath:ofObject:change:context:),
+                observe_value_for_key_path as extern "C" fn(_, _, _, _, _, _),
+              );
+              extern "C" fn observe_value_for_key_path(
+                this: &Object,
+                _sel: Sel,
+                key_path: id,
+                of_object: id,
+                _change: id,
+                _context: id,
+              ) {
+                let key = NSString(key_path);
+                if key.to_str() == "title" {
+                  unsafe {
+                    let function = this.get_ivar::<*mut c_void>("function");
+                    if !function.is_null() {
+                      let function = &mut *(*function as *mut Box<dyn Fn(String)>);
+                      let title: id = msg_send![of_object, title];
+                      (function)(NSString(title).to_str().to_string());
+                    }
                   }
                 }
               }
+              cls.register()
             }
-            cls.register()
-          }
-          None => class!(DocumentTitleChangedDelegate),
+            None => class!(DocumentTitleChangedDelegate),
+          };
+
+          let handler: *mut AnyObject = objc2::msg_send![cls, new];
+          let document_title_changed_handler =
+            Box::into_raw(Box::new(document_title_changed_handler));
+
+          let ivar = (*handler).class().instance_variable("function").unwrap();
+          let ivar_delegate = ivar.load_mut(&mut *handler);
+          *ivar_delegate = document_title_changed_handler as *mut _ as *mut c_void;
+
+          // (*handler).set_ivar(
+          //   "function",
+          //   document_title_changed_handler as *mut _ as *mut c_void,
+          // );
+
+          webview.addObserver_forKeyPath_options_context(
+            &*(handler.cast::<NSObject>()),
+            &objc2_foundation::NSString::from_str("title"),
+            NSKeyValueObservingOptions::NSKeyValueObservingOptionNew,
+            nil as *mut c_void,
+          );
+
+          // let _: () = msg_send![webview, addObserver:handler forKeyPath:NSString::new("title") options:0x01 context:nil ];
+
+          document_title_changed_handler
+        } else {
+          null_mut()
         };
-
-        let handler: id = msg_send![cls, new];
-        let document_title_changed_handler =
-          Box::into_raw(Box::new(document_title_changed_handler));
-
-        (*handler).set_ivar(
-          "function",
-          document_title_changed_handler as *mut _ as *mut c_void,
-        );
-
-        let _: () = msg_send![webview, addObserver:handler forKeyPath:NSString::new("title") options:0x01 context:nil ];
-
-        document_title_changed_handler
-      } else {
-        null_mut()
-      };
 
       // Navigation handler
       extern "C" fn navigation_policy(this: &Object, _: Sel, _: id, action: id, handler: id) {
@@ -1583,7 +1608,6 @@ unsafe fn window_position(view: &NSView, x: i32, y: i32, height: f64) -> CGPoint
 //       objc2::runtime::Bool::NO
 //     }
 //   }
-
 
 // );
 

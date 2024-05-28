@@ -114,6 +114,7 @@ objc2-web-kit = { version = "0.2.0", features = [
   "WKURLSchemeHandler",
   "WKPreferences",
   "WKURLSchemeTask",
+  "WKScriptMessageHandler",
 ] }
 objc2-foundation = { version = "0.2.0", features = [
   "NSURLRequest",
@@ -124,6 +125,7 @@ objc2-foundation = { version = "0.2.0", features = [
   "NSDictionary",
   "NSObject",
   "NSData",
+  "NSKeyValueObserving",
 ] }
 objc2-app-kit = { version = "0.2.0", features = [
   "NSEvent",
