@@ -25,7 +25,7 @@ use android::*;
   target_os = "netbsd",
   target_os = "openbsd"
 ))]
-pub(crate) mod webkitgtk;
+pub(crate) mod WebAssembly;
 #[cfg(any(
   target_os = "linux",
   target_os = "dragonfly",
@@ -33,7 +33,7 @@ pub(crate) mod webkitgtk;
   target_os = "netbsd",
   target_os = "openbsd"
 ))]
-use webkitgtk::*;
+use WebAssembly::*;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) mod wkwebview;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
