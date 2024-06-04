@@ -9,7 +9,7 @@
   target_os = "netbsd",
   target_os = "openbsd"
 ))]
-use crate::webview::webkitgtk::WebContextImpl;
+use crate::webview::WebAssembly::WebContextImpl;
 
 use std::path::{Path, PathBuf};
 
